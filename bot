@@ -1,0 +1,135 @@
+require('dotenv').config();
+const { Client, GatewayIntentBits } = require('discord.js');
+const { joinVoiceChannel, createAudioPlayer, createAudioResource, StreamType, getVoiceConnection } = require('@discordjs/voice');
+const youtubedl = require('youtube-dl-exec'); // ใช้ youtube-dl-exec แทน ytdl-core
+const { generateDependencyReport } = require('@discordjs/voice');
+console.log(generateDependencyReport());
+
+const libsodium = require('libsodium-wrappers');
+(async() => {
+    await libsodium.ready;
+    console.log("libsodium-wrappers loaded successfully");
+})();
+
+const client = new Client({
+    intents: [
+        GatewayIntentBits.Guilds,
+        GatewayIntentBits.GuildVoiceStates,
+        GatewayIntentBits.GuildMessages,
+        GatewayIntentBits.MessageContent
+    ],
+});
+
+const prefix = '!';
+
+client.on('ready', () => {
+    console.log(`Logged in as ${client.user.tag}!`);
+});
+
+client.on('messageCreate', async message => {
+    if (!message.content.startsWith(prefix) || message.author.bot) return;
+
+    const args = message.content.slice(prefix.length).trim().split(/ +/);
+    const command = args.shift().toLowerCase();
+
+    if (command === 'play') {
+        if (!args.length) return message.reply('กรุณาให้ลิงก์ YouTube นะไอโง่เสี่ยว');
+
+        const voiceChannel = message.member.voice.channel;
+        if (!voiceChannel) return message.reply('กรุณาเข้าไปในช่องเสียงก่อน!');
+
+        try {
+            // เข้าร่วมช่องเสียง
+            const connection = joinVoiceChannel({
+                channelId: voiceChannel.id,
+                guildId: voiceChannel.guild.id,
+                adapterCreator: voiceChannel.guild.voiceAdapterCreator,
+            });
+
+            const player = createAudioPlayer();
+            let videoUrls = [];
+
+            // ตรวจสอบว่าเป็น Playlist หรือวิดีโอเดี่ยว
+            if (args[0].includes('playlist')) {
+                const playlistId = args[0].split('list=')[1];  // ดึง Playlist ID จากลิงก์
+
+                // ใช้ youtube-dl-exec เพื่อดึงข้อมูล Playlist
+                const playlist = await youtubedl(`https://www.youtube.com/playlist?list=${playlistId}`, {
+                    flatPlaylist: true,
+                    dumpSingleJson: true
+                });
+
+                videoUrls = playlist.entries.map(video => `https://www.youtube.com/watch?v=${video.id}`);
+                message.reply(`กำลังเล่น Playlist: ${playlist.title}`);
+            } else {
+                // ถ้าเป็นวิดีโอเดี่ยว
+                videoUrls.push(args[0]);
+            }
+
+            // ฟังก์ชันสำหรับเล่นวิดีโอจากลิงก์ที่ดึงมา
+            const playNext = async () => {
+                if (videoUrls.length === 0) {
+                    message.reply('จบการเล่น Playlist');
+                    const connection = getVoiceConnection(message.guild.id);
+                    if (connection && !connection.destroyed) {
+                        connection.destroy();
+                    }
+                    return;
+                }
+
+                const videoUrl = videoUrls.shift();
+
+                // ใช้ youtube-dl-exec เพื่อดึงสตรีมเสียง
+                const stream = youtubedl.exec(videoUrl, {
+                    o: '-',
+                    q: true,
+                    f: 'bestaudio'
+                }, { stdio: ['ignore', 'pipe', 'ignore'] }).stdout;
+
+                const resource = createAudioResource(stream, { inputType: StreamType.Arbitrary });
+                console.log('กำลังสตรีมเสียงจาก:', videoUrl);
+
+                player.play(resource);
+                connection.subscribe(player);
+
+                player.on('error', error => {
+                    console.error('เกิดข้อผิดพลาดขณะเล่นเพลง:', error.message);
+                    message.reply('เกิดข้อผิดพลาดในการสตรีมวิดีโอนี้');
+                    playNext(); // เล่นวิดีโอถัดไปหากเกิดข้อผิดพลาด
+                });
+
+                player.on('stateChange', (oldState, newState) => {
+                    if (newState.status === 'idle') {
+                        playNext(); // เล่นวิดีโอถัดไปเมื่อจบวิดีโอก่อนหน้า
+                    }
+                });
+            };
+
+            playNext(); // เริ่มเล่นวิดีโอแรก
+
+        } catch (error) {
+            console.error('Error while joining voice channel:', error);
+            message.reply('เกิดข้อผิดพลาดในการเชื่อมต่อกับช่องเสียง');
+        }
+    }
+
+    if (command === 'stop') {
+        const voiceChannel = message.member.voice.channel;
+        if (!voiceChannel) return message.reply('คุณต้องอยู่ในช่องเสียงเพื่อหยุดเพลง!');
+
+        try {
+            const connection = getVoiceConnection(voiceChannel.guild.id);
+            if (connection) {
+                connection.destroy();
+                message.reply('หยุดเล่นเพลงและออกจากช่องเสียงแล้ว');
+            } else {
+                message.reply('ไม่ได้เล่นเพลงอยู่ในขณะนี้');
+            }
+        } catch (error) {
+            console.error('Error while stopping music:', error);
+            message.reply('เกิดข้อผิดพลาดในการหยุดเพลง');
+        }
+    }
+});
+
+client.login(process.env.BOT_TOKEN);
