@@ -1,0 +1,104 @@
+require('dotenv').config();
+const { Client, GatewayIntentBits } = require('discord.js');
+const { joinVoiceChannel, createAudioPlayer, createAudioResource, AudioPlayerStatus, NoSubscriberBehavior } = require('@discordjs/voice');
+const ytdl = require('ytdl-core');
+
+const client = new Client({
+    intents: [
+        GatewayIntentBits.Guilds,
+        GatewayIntentBits.GuildVoiceStates,
+        GatewayIntentBits.GuildMessages,
+        GatewayIntentBits.MessageContent
+    ],
+});
+
+const prefix = '!';
+
+let queue = [];  // คิวเพลง
+let player = createAudioPlayer(); // สร้าง player ทันที
+let connection;  // การเชื่อมต่อกับช่องเสียง
+let isPlaying = false;  // ตรวจสอบสถานะการเล่นเพลง
+
+client.on('ready', () => {
+    console.log(`Logged in as ${client.user.tag}!`);
+});
+
+client.on('messageCreate', async message => {
+    if (!message.content.startsWith(prefix) || message.author.bot) return;
+
+    const args = message.content.slice(prefix.length).trim().split(/ +/);
+    const command = args.shift().toLowerCase();
+
+    if (command === 'play') {
+        if (!args.length) return message.reply('กรุณาให้ลิงก์ YouTube ที่ต้องการเล่น!');
+
+        const voiceChannel = message.member.voice.channel;
+        if (!voiceChannel) return message.reply('กรุณาเข้าไปในช่องเสียงก่อน!');
+
+        const songUrl = args[0];
+        queue.push(songUrl);  // เพิ่มเพลงเข้าไปในคิว
+        message.reply(`เพิ่มเพลงในคิว: ${songUrl}`);
+
+        // หากยังไม่มีการเชื่อมต่อ ให้สร้างการเชื่อมต่อกับช่องเสียง
+        if (!connection) {
+            connection = joinVoiceChannel({
+                channelId: voiceChannel.id,
+                guildId: voiceChannel.guild.id,
+                adapterCreator: voiceChannel.guild.voiceAdapterCreator,
+            });
+
+            // ทำให้ player เชื่อมต่อกับช่องเสียง
+            connection.subscribe(player);
+        }
+
+        // ถ้าไม่มีการเล่นเพลงอยู่ ให้เริ่มเล่นเพลง
+        if (!isPlaying) {
+            playNextSong(message);  // เล่นเพลงแรกในคิว
+        }
+    }
+
+    if (command === 'stop') {
+        if (player) {
+            player.stop(); // หยุดเล่นเพลง
+            queue = [];    // ล้างคิวเพลง
+            isPlaying = false;
+            message.reply('หยุดเล่นเพลงและล้างคิวแล้ว');
+        }
+    }
+});
+
+function playNextSong(message) {
+    if (queue.length === 0) {
+        message.channel.send('คิวเพลงว่างแล้ว!');
+        connection.destroy(); // ออกจากช่องเสียงเมื่อคิวว่าง
+        connection = null;
+        isPlaying = false;
+        return;
+    }
+
+    const songUrl = queue.shift(); // ดึงเพลงแรกในคิวออกมาเล่น
+    isPlaying = true;  // เริ่มเล่นเพลง
+
+    const stream = ytdl(songUrl, { filter: 'audioonly' });
+    const resource = createAudioResource(stream);
+
+    player.play(resource);
+
+    player.on(AudioPlayerStatus.Playing, () => {
+        message.channel.send(`กำลังเล่นเพลง: ${songUrl}`);
+    });
+
+    player.on(AudioPlayerStatus.Idle, () => {
+        isPlaying = false;  // เมื่อเพลงจบ
+        playNextSong(message); // เล่นเพลงต่อไปในคิว
+    });
+
+    player.on('error', error => {
+        console.error(`เกิดข้อผิดพลาดขณะเล่นเพลง: ${error.message}`);
+        message.channel.send('เกิดข้อผิดพลาดขณะเล่นเพลง');
+        isPlaying = false;
+        playNextSong(message); // ข้ามไปเพลงต่อไปหากเกิดข้อผิดพลาด
+    });
+}
+
+client.login(process.env.BOT_TOKEN);
